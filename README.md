@@ -10,7 +10,7 @@ wget https://raw.githubusercontent.com/itiligent/Easy-OpenVAS-Installer/main/ope
 
 ### 📦 Auto upgrade link
 ```bash
-wget https://raw.githubusercontent.com/itiligent/Easy-OpenVAS-Installer/main/openvas-upgrade.sh && chmod +x openvas-upgrade.sh  && ./openvas-upgrade.sh 
+wget https://github.com/allenacevedo/Easy-OpenVAS-Installer/raw/refs/heads/main/openvas-upgrade.sh && chmod +x openvas-upgrade.sh  && ./openvas-upgrade.sh 
 ```
 
 ##### 💻 Note: On low power systems cached sudo credentials may timeout and re-prompt
