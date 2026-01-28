@@ -438,7 +438,7 @@ sudo cp -rvf $INSTALL_DIR/gvm-libs/* /
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading gvmd to $GVMD_VERSION"
@@ -518,7 +518,7 @@ sudo systemctl enable gvmd
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading pg-gvm to $PG_GVM_VERSION"
@@ -563,7 +563,7 @@ sudo cp -rvf $INSTALL_DIR/pg-gvm/* /
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading gsa to $GSA_VERSION"
@@ -583,7 +583,7 @@ echo
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e "Upgrading gsad to $GSAD_VERSION"
@@ -667,7 +667,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable gsad
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading openvas-smb to $OPENVAS_SMB_VERSION"
@@ -713,7 +713,7 @@ sudo cp -rvf $INSTALL_DIR/openvas-smb/* /
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading openvas-scanner to $OPENVAS_SCANNER_VERSION"
@@ -766,7 +766,7 @@ sudo printf "openvasd_server = http://127.0.0.1:3000\n" | sudo tee -a /etc/openv
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading ospd-openvas to $OSPD_OPENVAS_VERSION"
@@ -832,7 +832,7 @@ sudo systemctl enable ospd-openvas
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading openvasd to $OPENVAS_DAEMON"
@@ -910,7 +910,7 @@ sudo systemctl enable openvasd
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading greenbone-feed-sync"
@@ -940,7 +940,7 @@ sudo cp -rvf $INSTALL_DIR/greenbone-feed-sync/* /
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading gvm-tools"
@@ -970,7 +970,7 @@ sudo cp -rvf $INSTALL_DIR/gvm-tools/* /
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Upgrading the Redis data store"
@@ -1003,7 +1003,7 @@ sudo usermod -aG redis gvm
 
 
 echo -e ${LGREEN}
-read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
+#read -p "Please check above output for any errors or issues with (new) dependencies not found. Hit enter to continue."
 echo -e ${NC}
 echo -e "${LGREEN}###############################################################################"
 echo -e " Setting gvm privs, importing feed signature & migrating database, BE PATIENT!"
