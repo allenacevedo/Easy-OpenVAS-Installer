@@ -22,9 +22,13 @@
 # - Deletes the successful test database, then migrates the live database.
 # - If rehearsal fails, retains the test database and backups for inspection and 
 #   the live database remains unmigrated and GVM services remain stopped.
+# - --skip-migration-rehearsal skips backups, the restored-copy test and its space
+#   checks. Live migration and the final account/key checks still run. Only small
+#   cron recovery files and account/key verification records are retained.
 #
 # --check           Check layout compatibility without changing the installation.
 # --migrate-legacy  Perform the one-time migration and component upgrade.
+# --skip-migration-rehearsal  Omit backups and the legacy migration rehearsal.
 
 
 ##############################################################################
@@ -47,7 +51,7 @@ FORCE_FEED_SYNC_VERSION="${FORCE_FEED_SYNC_VERSION:-}"
 FORCE_GVM_TOOLS_VERSION="${FORCE_GVM_TOOLS_VERSION:-}"
 FORCE_PYTHON_GVM_VERSION="${FORCE_PYTHON_GVM_VERSION:-}"
 FORCE_PYPSRP_CLI_VERSION="${FORCE_PYPSRP_CLI_VERSION:-}"
-FORCE_FEED_RELEASE="${FORCE_FEED_RELEASE:-}"
+FORCE_FEED_RELEASE="${FORCE_FEED_RELEASE:-}" # Blank: use feed-sync defaults/configuration.
 
 INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local}"
 PYTHON_BIN="${PYTHON_BIN:-/usr/bin/python3}"
@@ -58,8 +62,15 @@ DB_NAME="${DB_NAME:-gvmd}"
 DB_HOST="${DB_HOST:-/var/run/postgresql}"
 DB_PORT="${DB_PORT:-5432}"
 POSTGRESQL_MAJOR="${POSTGRESQL_MAJOR:-}" # Blank: detect; a mismatch is rejected.
-SYNC_FEEDS="${SYNC_FEEDS:-true}"       # Run the selected feed release after migration.
+SYNC_FEEDS="${SYNC_FEEDS:-true}"       # Synchronize feeds after migration.
+SKIP_MIGRATION_REHEARSAL="${SKIP_MIGRATION_REHEARSAL:-false}" # true skips ALL backups, the test copy and its space checks.
+# Rehearsal threshold: this percentage of the database size, plus 1 GiB.
+# Set to 150 for a less conservative check; actual restore space is unchanged.
+MIGRATION_TEST_SPACE_PERCENT="${MIGRATION_TEST_SPACE_PERCENT:-200}"
 KEEP_BUILD_FILES="${KEEP_BUILD_FILES:-false}" # Failed runs always retain their files.
+BUILD_JOBS="${BUILD_JOBS:-2}"          # Parallel CMake, Make, Rust and Python build jobs.
+AUTO_REMOVE_PACKAGES="${AUTO_REMOVE_PACKAGES:-false}" # Opt in to APT autoremove before service checks.
+FEED_WAIT_SECONDS="${FEED_WAIT_SECONDS:-600}" # Wait for running feed sync after pausing cron; 0 fails immediately.
 SERVICE_CHECK_SECONDS="${SERVICE_CHECK_SECONDS:-15}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-0.2}" # Seconds between updates; fractions such as 0.2 are supported.
 
@@ -124,6 +135,7 @@ GVM_SERVICES=(gsad gvmd ospd-openvas openvasd)
 SERVICE_PATH="$INSTALL_PREFIX/bin:$INSTALL_PREFIX/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 MAINTENANCE_STARTED=false
 UPGRADE_COMPLETE=false
+FEED_SYNC_FAILED=false
 LEGACY_MIGRATION=false
 MIGRATION_TEST_DB=""
 MIGRATION_TEST_CREATED=false
@@ -325,6 +337,20 @@ run_task() {
     finish_progress 0
 }
 
+run_optional_task() {
+    # For an external command whose failure the caller handles explicitly.
+    PROGRESS_LABEL="$1"
+    shift
+    PROGRESS_STARTED=$SECONDS
+    print_progress 0 "${LPURPLE}[>]${NC} $PROGRESS_LABEL ..."
+    progress_loop "$$" "$PROGRESS_STARTED" "$PROGRESS_LABEL" &
+    PROGRESS_PID=$!
+    local status=0
+    "$@" || status=$?
+    finish_progress "$status"
+    return "$status"
+}
+
 save_output() {
     local destination="$1"
     shift
@@ -358,13 +384,20 @@ cleanup() {
     [[ "$BASHPID" == "$UPGRADER_PID" ]] || return "$status"
     trap - EXIT ERR
     finish_progress "$status"
+    if [[ "$MAINTENANCE_STARTED" != true && -n "$BACKUP_DIR" &&
+          -f "$BACKUP_DIR/cron/paused-owners" ]]; then
+        # No installation changes have begun: undo a pause on timeout/cancellation.
+        if ! restore_migration_cron original; then
+            printf 'Could not restore every original feed schedule. Recovery files: %s/cron\n' "$BACKUP_DIR" >&2
+        fi
+    fi
     if [[ "$MAINTENANCE_STARTED" == true && "$UPGRADE_COMPLETE" != true ]]; then
         # Do not leave a partially upgraded set of daemons running after a failure.
         sudo -n systemctl stop "${GVM_SERVICES[@]}" || true
-        printf '\nGVM services were stopped. Work and backups retained at: %s\n' "$RUN_DIR" >&2
+        printf '\nGVM services were stopped. Work and recovery files retained at: %s\n' "$RUN_DIR" >&2
     fi
-    if [[ "$LEGACY_MIGRATION" == true && -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
-        if [[ ! -f "$RUN_DIR/legacy-migration-complete.txt" ]]; then
+    if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+        if [[ "$MAINTENANCE_STARTED" == true && ! -f "$RUN_DIR/upgrade-complete.txt" ]]; then
             printf 'Feed cron recovery files, if paused: %s/cron\n' "$BACKUP_DIR" >&2
         fi
         if [[ "$MIGRATION_TEST_CREATED" == true ]]; then
@@ -427,13 +460,21 @@ select_postgresql_major() {
 }
 
 detect_postgresql() {
-    local server_version
+    local server_version tool
     server_version=$(as_postgres psql -X -At --host="$DB_HOST" --port="$DB_PORT" \
         --dbname="$DB_NAME" -c 'SHOW server_version_num;')
     select_postgresql_major "$server_version"
     PG_BIN="/usr/lib/postgresql/$POSTGRESQL_MAJOR/bin"
     PG_CONFIG="$PG_BIN/pg_config"
-    [[ -x "$PG_CONFIG" && -x "$PG_BIN/pg_dump" ]] || die "Missing PostgreSQL $POSTGRESQL_MAJOR tools."
+    local -a required_tools=(psql)
+    if [[ "$SKIP_MIGRATION_REHEARSAL" != true ]]; then
+        required_tools+=(pg_dump pg_dumpall pg_restore)
+        if [[ "$LEGACY_MIGRATION" == true ]]; then required_tools+=(createdb dropdb); fi
+    fi
+    for tool in "${required_tools[@]}"; do
+        [[ -x "$PG_BIN/$tool" ]] || die "Missing PostgreSQL client: $PG_BIN/$tool"
+    done
+    # pg_config is checked after install_dependencies installs the development package.
     if [[ -n "${VERSION_LOG:-}" ]]; then
         printf 'POSTGRESQL_MAJOR=%s\n' "$POSTGRESQL_MAJOR" >> "$VERSION_LOG"
     fi
@@ -466,13 +507,20 @@ check_existing_installation() {
 
 upgrade_usage() {
     cat <<'HELP'
-Usage: bash openvas-upgrade.sh [--check | --migrate-legacy]
+Usage: bash openvas-upgrade.sh [--check | --migrate-legacy] [--skip-migration-rehearsal]
 
 No option: upgrade an installation already using /opt/gvm/venvs.
 --check: inspect the installation and database without changing services,
          packages, cron jobs, configuration or the database.
 --migrate-legacy: migrate a source installation using the older global/user
          Python layout to the October 2026 layout, then upgrade its components.
+--skip-migration-rehearsal: skip ALL backup archives/dumps and copies of replaced
+         files, plus the restored-copy test and its free-space checks.
+         The live migration and final account/key checks still run. Small cron
+         recovery files and account/key verification records are retained.
+         Also available as SKIP_MIGRATION_REHEARSAL=true in the settings/environment.
+
+Example: bash openvas-upgrade.sh --migrate-legacy --skip-migration-rehearsal
 
 Run as your normal sudo-enabled user. Edit FORCE_*_VERSION settings to pin
 releases; blank selects latest stable. OSPD has its own release selection.
@@ -483,15 +531,31 @@ Legacy support is limited to the original systemd layout with all four services,
 Package/container installs, notus-only layouts and custom service commands need
 a separate migration plan. --check reports these rather than deleting anything.
 
-Before migration: stop scans, take a VM/disk snapshot, reserve space for a full
-state/program backup AND a restored copy of the database, and suspend custom
-feed wrappers/timers. Recognised feed cron commands are paused automatically;
-their schedules are restored with the selected feed release after success.
+Before migration: stop scans, take a VM/disk snapshot, allow space for a full
+state/program backup and a restored database copy unless backups/rehearsal are
+skipped. Builds and live migration always require working space.
+Suspend custom feed wrappers/timers.
+Recognised feed cron commands are paused automatically;
+running syncs are given FEED_WAIT_SECONDS (default 600) to finish before services
+are stopped. Early failure restores original cron jobs; failure after maintenance
+starts leaves them paused for repair. Schedules are restored after success.
+FORCE_FEED_RELEASE is optional;
+blank leaves feed selection to feed-sync's defaults/configuration.
+
+Rehearsal free-space threshold: database size x MIGRATION_TEST_SPACE_PERCENT / 100,
+plus 1 GiB. Default: 200; 150 allows less headroom. Lowering the threshold does
+not reduce the restore's actual disk use or guarantee enough space.
+
+BUILD_JOBS defaults to 2. AUTO_REMOVE_PACKAGES defaults to false; setting it to
+true runs APT autoremove before starting and checking services.
+Feed download failures are reported with a retry command and do not prevent
+the upgraded services from starting.
 
 No existing users, roles, passwords, keys, certificates or live database are recreated.
 The rehearsal creates and restores a separate temporary database.
-No system Python packages or services are uninstalled. PostgreSQL stays on its
-existing major version. Failure before successful service checks leaves GVM
+System Python packages and services are retained by default. Optional APT
+autoremove can remove packages marked unused. PostgreSQL stays on its existing
+major version. Failure before successful service checks leaves GVM
 stopped for repair. Paused feed jobs, backups and any failed rehearsal database
 are retained until recovery or successful completion.
 HELP
@@ -506,14 +570,21 @@ capture_accounts() {
 }
 
 check_migration_database_space() {
+    if [[ "$SKIP_MIGRATION_REHEARSAL" == true ]]; then
+        printf 'Migration rehearsal free-space check skipped.\n'
+        return
+    fi
     local bytes directory available required
+    [[ "$MIGRATION_TEST_SPACE_PERCENT" =~ ^[1-9][0-9]{2,3}$ ]] &&
+        (( MIGRATION_TEST_SPACE_PERCENT <= 1000 )) ||
+        die 'MIGRATION_TEST_SPACE_PERCENT must be an integer from 100 to 1000.'
     bytes=$(psql_db -At -c 'SELECT pg_database_size(current_database());')
     directory=$(psql_db -At -c 'SHOW data_directory;')
     [[ "$bytes" =~ ^[0-9]+$ && "$directory" == /* ]] || die 'Cannot assess PostgreSQL storage.'
     available=$(sudo df -PB1 -- "$directory" | awk 'NR == 2 { print $4 }')
     [[ "$available" =~ ^[0-9]+$ ]] || die 'Cannot read free space on the PostgreSQL filesystem.'
-    # A minimum floor for the restored copy, indexes and WAL; not a reservation.
-    required=$((bytes * 2 + 1073741824))
+    # A configurable estimate for the restored copy, indexes and WAL; not a reservation.
+    required=$(((bytes * MIGRATION_TEST_SPACE_PERCENT + 99) / 100 + 1073741824))
     (( available >= required )) || die "Insufficient free PostgreSQL space for rehearsal: $available bytes available, at least $required required."
     printf 'Database size: %s bytes; free PostgreSQL space: %s bytes (minimum floor: %s).\n' "$bytes" "$available" "$required"
 }
@@ -566,9 +637,6 @@ check_legacy_layout() {
     fi
     owner=$(psql_db -At -c 'SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database();')
     [[ "$owner" == gvm ]] || die 'Expected the existing gvmd database to be owned by gvm.'
-    for path in psql pg_dump pg_dumpall pg_restore createdb dropdb; do
-        [[ -x "$PG_BIN/$path" ]] || die "Required PostgreSQL client missing: $PG_BIN/$path"
-    done
     psql_db -At -c "SELECT value FROM public.meta WHERE name = 'database_version';"
     psql_db -At -c 'SELECT count(*) FROM public.users;'
     printf 'Legacy profile recognised. Existing gvm UID/GID: %s\n' "$(id -u gvm):$(id -g gvm)"
@@ -596,7 +664,11 @@ show_layout_report() {
     fi
     printf 'Keep the gvm account, database, /var/lib/gvm, /var/lib/openvas, /var/lib/notus,\n'
     printf '/etc/gvm, /etc/openvas, existing keys, certificates and service units.\n'
-    printf 'Assessment checks layout only; a successful restored-copy migration is still required.\n'
+    if [[ "$SKIP_MIGRATION_REHEARSAL" == true ]]; then
+        printf 'Assessment checks layout only; the upgrade will migrate the live database without a rehearsal.\n'
+    else
+        printf 'Assessment checks layout only; a successful restored-copy migration is still required.\n'
+    fi
 }
 
 read_migration_cron() {
@@ -619,10 +691,11 @@ pause_migration_cron() {
     [[ "$entry" == root || "$entry" == gvm ]] || owners+=("$entry")
     mkdir -p "$BACKUP_DIR/cron"
     : > "$BACKUP_DIR/cron/paused-owners"
+    : > "$BACKUP_DIR/cron/pending-owners"
     # Prepare all files first. Reject shell wrappers instead of rewriting them.
     for owner in "${owners[@]}"; do
         read_migration_cron "$owner" "$BACKUP_DIR/cron/$owner.original"
-        "$PYTHON_BIN" - "$BACKUP_DIR/cron/$owner" "$FEED_RELEASE" <<'PY'
+        "$PYTHON_BIN" - "$BACKUP_DIR/cron/$owner" "$FORCE_FEED_RELEASE" <<'PY'
 import pathlib, re, shlex, sys
 base, release = pathlib.Path(sys.argv[1]), sys.argv[2]
 original = pathlib.Path(str(base) + '.original').read_text()
@@ -653,7 +726,8 @@ for line in original.splitlines(keepends=True):
         if args[i].startswith('--feed-release='):
             i += 1; continue
         new.append(args[i]); i += 1
-    new += ['--feed-release', release]
+    if release:
+        new += ['--feed-release', release]
     # Retire old user-local/bare launch paths without uninstalling their packages.
     new[0] = '/usr/local/bin/' + pathlib.PurePosixPath(args[0]).name
     paused.append(marker + line.rstrip('\r\n') + '\n')
@@ -662,23 +736,44 @@ pathlib.Path(str(base) + '.paused').write_text(''.join(paused))
 pathlib.Path(str(base) + '.resume').write_text(''.join(resumed))
 PY
         if ! cmp -s "$BACKUP_DIR/cron/$owner.original" "$BACKUP_DIR/cron/$owner.paused"; then
-            printf '%s\n' "$owner" >> "$BACKUP_DIR/cron/paused-owners"
+            printf '%s\n' "$owner" >> "$BACKUP_DIR/cron/pending-owners"
         fi
     done
     while IFS= read -r owner; do
         read_migration_cron "$owner" "$BACKUP_DIR/cron/$owner.current"
         cmp -s "$BACKUP_DIR/cron/$owner.original" "$BACKUP_DIR/cron/$owner.current" ||
             die "The $owner crontab changed during preparation; not overwriting it."
+        # Record before the mutation so cancellation can recover a partial pause.
+        printf '%s\n' "$owner" >> "$BACKUP_DIR/cron/paused-owners"
         sudo crontab -u "$owner" - < "$BACKUP_DIR/cron/$owner.paused"
         printf 'Paused recognised feed jobs for %s; original saved in %s/cron.\n' "$owner" "$BACKUP_DIR"
-    done < "$BACKUP_DIR/cron/paused-owners"
+    done < "$BACKUP_DIR/cron/pending-owners"
 }
 
 check_migration_feed_idle() {
-    local processes
-    if processes=$(pgrep -f '(^|/|[[:space:]])greenbone-(feed|nvt|scapdata|certdata)-sync([[:space:]]|$)'); then
-        die "A feed update is still running (PIDs: $processes). Wait for it to finish before retrying; saved cron jobs remain paused."
-    fi
+    local processes status deadline=$((SECONDS + FEED_WAIT_SECONDS))
+    while true; do
+        if processes=$(pgrep -f '(^|/|[[:space:]])greenbone-(feed|nvt|scapdata|certdata)-sync([[:space:]]|$)'); then
+            (( SECONDS < deadline )) ||
+                die "Feed sync is still running (PIDs: $processes). Timed out after $FEED_WAIT_SECONDS seconds; original feed schedules will be restored."
+            sleep 2
+        else
+            status=$?
+            (( status == 1 )) || die "Cannot check running feed sync processes (pgrep exit $status)."
+            return 0
+        fi
+    done
+}
+
+record_legacy_identity() {
+    run_task 'Recording the existing account UUIDs and names' capture_accounts "$DB_NAME" "$BACKUP_DIR/users-before.csv"
+    # Store hashes, not private key copies; these are also used when backups are skipped.
+    sudo find "$LEGACY_KEY_DIR" -type f \( -name '*.key' -o -name secring.gpg \) \
+        -exec sha256sum -- {} + > "$BACKUP_DIR/credential-key-checksums.txt"
+    [[ -s "$BACKUP_DIR/credential-key-checksums.txt" ]] ||
+        die 'No credential encryption private key found. Review/restore the key before migration.'
+    getent passwd gvm > "$BACKUP_DIR/gvm-account.txt"
+    id gvm >> "$BACKUP_DIR/gvm-account.txt"
 }
 
 backup_legacy_state() {
@@ -702,14 +797,7 @@ backup_legacy_state() {
     run_task 'Backing up the existing local program and Python files' save_output "$BACKUP_DIR/legacy-programs.tar.gz" \
         sudo tar --acls --xattrs -C / -czf - "${paths[@]}"
     tar -tzf "$BACKUP_DIR/legacy-programs.tar.gz" > /dev/null
-    run_task 'Recording the existing account UUIDs and names' capture_accounts "$DB_NAME" "$BACKUP_DIR/users-before.csv"
-    # Hash only private key material; trust databases and agent sockets may change.
-    sudo find "$LEGACY_KEY_DIR" -type f \( -name '*.key' -o -name secring.gpg \) \
-        -exec sha256sum -- {} + > "$BACKUP_DIR/credential-key-checksums.txt"
-    [[ -s "$BACKUP_DIR/credential-key-checksums.txt" ]] ||
-        die 'No credential encryption private key found. Review/restore the key before migration.'
-    getent passwd gvm > "$BACKUP_DIR/gvm-account.txt"
-    id gvm >> "$BACKUP_DIR/gvm-account.txt"
+    record_legacy_identity
     dpkg-query -W > "$BACKUP_DIR/packages-before.txt"
     for path in "${GVM_SERVICES[@]}" redis-server@openvas; do
         systemctl cat "$path.service" > "$BACKUP_DIR/$path.service.txt"
@@ -753,7 +841,9 @@ EOF
     # Restore the distro marker only from the exact .old file left by old scripts.
     marker=$("$PYTHON_BIN" -c 'import sysconfig; print(sysconfig.get_path("stdlib") + "/EXTERNALLY-MANAGED")')
     if ! sudo test -e "$marker" && sudo test -f "$marker.old"; then
-        sudo cp -a -- "$marker.old" "$BACKUP_DIR/EXTERNALLY-MANAGED.old"
+        if [[ "$SKIP_MIGRATION_REHEARSAL" != true ]]; then
+            sudo cp -a -- "$marker.old" "$BACKUP_DIR/EXTERNALLY-MANAGED.old"
+        fi
         sudo cp -a -- "$marker.old" "$marker"
         printf 'Restored the original distro EXTERNALLY-MANAGED marker from its .old copy.\n'
     fi
@@ -761,10 +851,14 @@ EOF
 
 verify_legacy_keys() {
     sudo sha256sum --check --status "$BACKUP_DIR/credential-key-checksums.txt" ||
-        die 'Credential encryption key material changed; stop and restore/review the saved keys.'
+        die 'Credential encryption key material changed; keep services stopped and review the verification records and original keys.'
 }
 
 rehearse_database_migration() {
+    if [[ "$SKIP_MIGRATION_REHEARSAL" == true ]]; then
+        printf '%sMigration rehearsal skipped; proceeding with the live database migration.%s\n' "$LYELLOW" "$NC"
+        return
+    fi
     check_migration_database_space
     # createdb must succeed; never reuse or drop a pre-existing database.
     MIGRATION_TEST_DB="gvmd_migration_${BUILD_ID//[^[:alnum:]]/_}"
@@ -795,14 +889,30 @@ rehearse_database_migration() {
 }
 
 restore_migration_cron() {
-    local owner
+    local variant="${1:-resume}" owner target status=0
+    [[ "$variant" == original || "$variant" == resume ]] || return 1
+    [[ -f "$BACKUP_DIR/cron/paused-owners" ]] || return 0
     while IFS= read -r owner; do
-        read_migration_cron "$owner" "$BACKUP_DIR/cron/$owner.current"
-        cmp -s "$BACKUP_DIR/cron/$owner.paused" "$BACKUP_DIR/cron/$owner.current" ||
-            die "The $owner crontab changed during migration. Keep those edits and merge $BACKUP_DIR/cron/$owner.resume manually."
-        sudo crontab -u "$owner" - < "$BACKUP_DIR/cron/$owner.resume"
-        printf 'Restored %s feed schedule with feed release %s.\n' "$owner" "$FEED_RELEASE"
+        target="$BACKUP_DIR/cron/$owner.$variant"
+        if ! read_migration_cron "$owner" "$BACKUP_DIR/cron/$owner.current"; then
+            status=1
+            continue
+        fi
+        # Also handles an interruption before the pause was applied, or a retry.
+        if cmp -s "$target" "$BACKUP_DIR/cron/$owner.current"; then continue; fi
+        if ! cmp -s "$BACKUP_DIR/cron/$owner.paused" "$BACKUP_DIR/cron/$owner.current"; then
+            printf 'The %s crontab changed. Keep those edits and merge %s manually.\n' "$owner" "$target" >&2
+            status=1
+            continue
+        fi
+        if ! sudo crontab -u "$owner" - < "$target"; then status=1; continue; fi
+        if [[ "$variant" == original ]]; then
+            printf 'Restored original feed schedule for %s; installation changes had not begun.\n' "$owner"
+        else
+            printf 'Restored %s feed schedule (%s).\n' "$owner" "${FORCE_FEED_RELEASE:-feed-sync defaults/configuration}"
+        fi
     done < "$BACKUP_DIR/cron/paused-owners"
+    return "$status"
 }
 
 get_latest_release() {
@@ -843,13 +953,13 @@ resolve_versions() {
     done
 
     # Use feed-sync's defaults unless a feed release is explicitly forced.
-    FEED_COMMAND="/usr/local/bin/greenbone-feed-sync"
+    FEED_SYNC_ARGS=()
 
-    if [[ -n "${FORCE_FEED_RELEASE:-}" ]]; then
+    if [[ -n "$FORCE_FEED_RELEASE" ]]; then
         [[ "$FORCE_FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] ||
             die "Invalid feed release: $FORCE_FEED_RELEASE"
 
-        FEED_COMMAND+=" --feed-release $FORCE_FEED_RELEASE"
+        FEED_SYNC_ARGS=(--feed-release "$FORCE_FEED_RELEASE")
     fi
 
     # Record the requested override; blank means no script-level override.
@@ -915,6 +1025,12 @@ backup_existing_system() {
     previous_umask=$(umask)
     umask 077
     mkdir -p -m 700 "$BACKUP_DIR"
+    if [[ "$SKIP_MIGRATION_REHEARSAL" == true ]]; then
+        printf '%sBackups skipped: no database dump, archives or copies of replaced files will be made.%s\n' "$LYELLOW" "$NC"
+        if [[ "$LEGACY_MIGRATION" == true ]]; then record_legacy_identity; fi
+        umask "$previous_umask"
+        return
+    fi
     psql_db -At -c 'SELECT version();' > "$BACKUP_DIR/postgresql-version.txt"
     run_task 'Backing up the GVMD database' save_output "$BACKUP_DIR/gvmd.dump" \
         as_postgres "$PG_BIN/pg_dump" --host="$DB_HOST" --port="$DB_PORT" --format=custom --dbname="$DB_NAME"
@@ -952,6 +1068,7 @@ install_dependencies() {
         "${FEED_DEPS[@]}" "${GVMTOOLS_DEPS[@]}" "${REDIS_DEPS[@]}" \
         "${OPENVASD_DEPS[@]}" "${PYPSRP_DEPS[@]}" \
         "postgresql-$POSTGRESQL_MAJOR" "postgresql-server-dev-$POSTGRESQL_MAJOR"
+    [[ -x "$PG_CONFIG" ]] || die "PostgreSQL development tool missing after package installation: $PG_CONFIG"
     "$PG_CONFIG" --version
     local server_version
     server_version=$(psql_db -At -c 'SHOW server_version_num;')
@@ -960,10 +1077,14 @@ install_dependencies() {
 }
 
 deploy_stage() {
+    local -a backup_args=()
+    if [[ "$SKIP_MIGRATION_REHEARSAL" != true ]]; then
+        backup_args=(--backup --backup-dir="$BACKUP_DIR/files")
+    fi
     # Upstream install targets contain default configuration and service files.
     # Exclude these even when they were generated by make/cmake install.
     run_task "Installing $(basename "$1") program files" \
-        sudo rsync -rl --keep-dirlinks --backup --backup-dir="$BACKUP_DIR/files" \
+        sudo rsync -rl --keep-dirlinks "${backup_args[@]}" \
         --exclude='/etc/***' --exclude='/var/***' --exclude='/run/***' \
         --exclude="$INSTALL_PREFIX/etc/***" \
         --exclude='/lib/systemd/***' --exclude='/usr/lib/systemd/***' \
@@ -977,7 +1098,7 @@ build_cmake() {
     section "Building $component $version"
     run_task "Configuring $component $version" \
         cmake -S "$SOURCE_DIR/$component-$version" -B "$BUILD_DIR/$component" "$@"
-    run_task "Compiling $component $version" cmake --build "$BUILD_DIR/$component" --parallel "$(nproc)"
+    run_task "Compiling $component $version" cmake --build "$BUILD_DIR/$component" --parallel "$BUILD_JOBS"
     run_task "Staging $component $version" env DESTDIR="$INSTALL_DIR/$component" cmake --install "$BUILD_DIR/$component"
     deploy_stage "$INSTALL_DIR/$component"
     sudo ldconfig
@@ -1014,7 +1135,7 @@ prepare_native_archives() {
             ./configure --prefix="$krb5_prefix" --enable-static --disable-shared \
             --without-system-verto --without-libedit --without-keyutils --disable-rpath
         for part in util/support util/et util/profile include lib/crypto lib/krb5 lib/gssapi; do
-            run_task "Compiling Kerberos: $part" make -C "$part" -j"$(nproc)"
+            run_task "Compiling Kerberos: $part" make -C "$part" -j"$BUILD_JOBS"
         done
         run_task 'Preparing the static Kerberos installation' make install-mkdirs
         for part in util/support util/et util/profile include lib/crypto lib/krb5 lib/gssapi; do
@@ -1026,7 +1147,7 @@ prepare_native_archives() {
         run_task "Configuring static libpcap $pcap_version" \
             ./configure --prefix="$pcap_prefix" --disable-shared --disable-dbus \
             --without-libnl --disable-usb --disable-bluetooth --disable-rdma
-        run_task "Compiling static libpcap $pcap_version" make -j"$(nproc)"
+        run_task "Compiling static libpcap $pcap_version" make -j"$BUILD_JOBS"
         run_task "Installing static libpcap $pcap_version" make install
     )
     export OPENVAS_KRB5_INCLUDE_DIR="$krb5_prefix/include"
@@ -1068,7 +1189,7 @@ build_rust_scanner() {
     printf 'RUST_VERSION=%q\nCARGO_VERSION=%q\n' "$(rustc --version)" "$(cargo --version)" >> "$VERSION_LOG"
     [[ -f Cargo.lock ]] || die "The scanner release does not contain Cargo.lock."
     BIN_VERSION="$OPENVAS_SCANNER_VERSION" run_task "Compiling openvasd and scannerctl $OPENVAS_SCANNER_VERSION" \
-        cargo build --locked --release \
+        cargo build --locked --release --jobs "$BUILD_JOBS" \
         --bin openvasd --bin scannerctl --target-dir "$BUILD_DIR/openvasd-target"
     mkdir -p "$INSTALL_DIR/rust$INSTALL_PREFIX/bin"
     install -m 755 "$BUILD_DIR/openvasd-target/release/openvasd" "$INSTALL_DIR/rust$INSTALL_PREFIX/bin/openvasd"
@@ -1087,7 +1208,9 @@ upgrade_python_app() {
     run_task "Updating pip in the $name environment" \
         sudo env PATH="$venv/bin:$build_path" "$venv/bin/python" -m pip install --upgrade pip
     run_task "Updating $name and its Python dependencies" \
-        sudo env PATH="$venv/bin:$build_path" "$venv/bin/python" -m pip install \
+        sudo env PATH="$venv/bin:$build_path" CARGO_BUILD_JOBS="$BUILD_JOBS" \
+        CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS" MAKEFLAGS="-j$BUILD_JOBS" \
+        "$venv/bin/python" -m pip install \
         --upgrade --upgrade-strategy only-if-needed "$@"
     run_task "Checking $name dependency consistency" "$venv/bin/python" -m pip check
     (umask 077; "$venv/bin/python" -m pip list --format=freeze > "$BUILD_LOG_DIR/$BUILD_ID-$name-requirements.txt")
@@ -1098,7 +1221,8 @@ link_python_commands() {
     shift
     for command in "$@"; do
         [[ -x "$PYTHON_ENV_DIR/$name/bin/$command" ]] || die "Missing Python command: $command"
-        if [[ "$LEGACY_MIGRATION" == true ]] &&             { sudo test -e "$INSTALL_PREFIX/bin/$command" || sudo test -L "$INSTALL_PREFIX/bin/$command"; }; then
+        if [[ "$LEGACY_MIGRATION" == true && "$SKIP_MIGRATION_REHEARSAL" != true ]] &&
+            { sudo test -e "$INSTALL_PREFIX/bin/$command" || sudo test -L "$INSTALL_PREFIX/bin/$command"; }; then
             sudo install -d -m 0700 "$BACKUP_DIR/launchers"
             sudo cp -a -- "$INSTALL_PREFIX/bin/$command" "$BACKUP_DIR/launchers/$command"
         fi
@@ -1159,7 +1283,7 @@ migrate_database() {
     if [[ "$LEGACY_MIGRATION" == true ]]; then
         capture_accounts "$DB_NAME" "$BACKUP_DIR/users-after.csv"
         cmp -s "$BACKUP_DIR/users-before.csv" "$BACKUP_DIR/users-after.csv" ||
-            die 'Account UUIDs/names differ after live migration; keep services stopped and review the backup.'
+            die 'Account UUIDs/names differ after live migration; keep services stopped and review the verification records and recovery options.'
         verify_legacy_keys
     fi
 }
@@ -1175,6 +1299,10 @@ start_services() {
 }
 
 upgrade_components() {
+    local -a web_backup_args=()
+    if [[ "$SKIP_MIGRATION_REHEARSAL" != true ]]; then
+        web_backup_args=(--backup --backup-dir="$BACKUP_DIR/web")
+    fi
     build_cmake gvm-libs "$GVM_LIBS_VERSION" \
         -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" -DCMAKE_BUILD_TYPE=Release \
         -DSYSCONFDIR=/etc -DLOCALSTATEDIR=/var
@@ -1191,7 +1319,7 @@ upgrade_components() {
     section "Updating GSA $GSA_VERSION"
     # Only this generated web distribution is pruned; no deletion is used at /.
     run_task "Installing GSA $GSA_VERSION web assets" \
-        sudo rsync -rl --delete --keep-dirlinks --backup --backup-dir="$BACKUP_DIR/web" \
+        sudo rsync -rl --delete --keep-dirlinks "${web_backup_args[@]}" \
         "$SOURCE_DIR/gsa-$GSA_VERSION/" "$INSTALL_PREFIX/share/gvm/gsad/web/"
     patch_gsad_redirect
     build_cmake gsad "$GSAD_VERSION" \
@@ -1223,12 +1351,10 @@ perform_upgrade() {
     reject_gvmd_downgrade
     section 'Downloading and verifying selected sources'
     download_all_sources
-    section 'Stopping GVM and backing up the existing installation'
-    if [[ "$LEGACY_MIGRATION" == true ]]; then
-        mkdir -p -m 700 "$BACKUP_DIR"
-        run_task 'Pausing recognised legacy feed cron jobs' pause_migration_cron
-        run_task 'Checking that no feed update is still running' check_migration_feed_idle
-    fi
+    section 'Preparing feed schedules and stopping GVM'
+    mkdir -p -m 700 "$BACKUP_DIR"
+    run_task 'Pausing recognised feed cron jobs' pause_migration_cron
+    run_task 'Waiting for any running feed sync to finish' check_migration_feed_idle
     MAINTENANCE_STARTED=true
     run_task 'Stopping OpenVAS services for the upgrade' sudo systemctl stop "${GVM_SERVICES[@]}"
     backup_existing_system
@@ -1250,16 +1376,23 @@ perform_upgrade() {
     run_task 'Checking installed executable and library dependencies' verify_binaries
     section 'Updating the PostgreSQL extension and migrating gvmd'
     migrate_database
+    if [[ "$AUTO_REMOVE_PACKAGES" == true ]]; then
+        run_task 'Removing unused APT packages (explicitly enabled)' sudo apt-get autoremove -qq -y
+    fi
     if [[ "$SYNC_FEEDS" == true ]]; then
-        section "Synchronizing existing feeds (release $FEED_RELEASE)"
-        run_task "Synchronizing Greenbone feeds, release $FEED_RELEASE" \
-            sudo -H "$INSTALL_PREFIX/bin/greenbone-feed-sync" --quiet --feed-release "$FEED_RELEASE" --fail-fast
+        section "Synchronizing existing feeds (${FORCE_FEED_RELEASE:-feed-sync defaults})"
+        if ! run_optional_task "Synchronizing Greenbone feeds (${FORCE_FEED_RELEASE:-feed-sync defaults/configuration})" \
+            sudo -H "$INSTALL_PREFIX/bin/greenbone-feed-sync" --quiet "${FEED_SYNC_ARGS[@]}" --fail-fast; then
+            FEED_SYNC_FAILED=true
+            printf '%sFeed sync did not complete. Continuing with service startup; a retry command will be shown below.%s\n' "$LYELLOW" "$NC" >&2
+        fi
     fi
     section 'Starting and checking the existing services'
     start_services
     UPGRADE_COMPLETE=true
+    run_task 'Restoring recognised feed schedules' restore_migration_cron
+    printf 'Upgrade completed: %s\n' "$(date -Is)" > "$RUN_DIR/upgrade-complete.txt"
     if [[ "$LEGACY_MIGRATION" == true ]]; then
-        run_task 'Restoring recognised feed schedules with the selected feed release' restore_migration_cron
         printf 'Legacy layout migration completed: %s\n' "$(date -Is)" > "$RUN_DIR/legacy-migration-complete.txt"
     fi
     if [[ "$KEEP_BUILD_FILES" != true ]]; then
@@ -1268,28 +1401,39 @@ perform_upgrade() {
         run_task 'Removing temporary build files' sudo rm -rf -- "$SOURCE_DIR" "$BUILD_DIR" "$INSTALL_DIR"
     fi
 
-    if [[ "$LEGACY_MIGRATION" == true ]]; then
-        printf 'Unused APT packages were retained for this first legacy migration.\n'
-    else
-        run_task "Removing unused APT packages" sudo apt-get autoremove -qq -y
-    fi
-    
     section 'OpenVAS upgrade complete'
-    printf '%sLog: %s\nResolved versions: %s\nBackups: %s%s\n' "$LGREEN" "$BUILD_LOG" "$VERSION_LOG" "$BACKUP_DIR"
+    printf '%sLog: %s\nResolved versions: %s\n' "$LGREEN" "$BUILD_LOG" "$VERSION_LOG"
+    if [[ "$SKIP_MIGRATION_REHEARSAL" == true ]]; then
+        printf 'Backups and rehearsal: skipped\nRecovery/verification records: %s\n' "$BACKUP_DIR"
+    else
+        printf 'Backups: %s\n' "$BACKUP_DIR"
+    fi
+    if [[ "$FEED_SYNC_FAILED" == true ]]; then
+        printf '%sFeed sync requires a retry. Run:\n  ' "$LYELLOW"
+        printf '%q ' sudo -H "$INSTALL_PREFIX/bin/greenbone-feed-sync" --quiet "${FEED_SYNC_ARGS[@]}" --fail-fast
+        printf '\n'
+    fi
     printf '%s\n' "$NC"
 }
 
 main() {
     init_style
-    local assessment=false
-    if (( $# > 1 )); then die 'Choose at most one option; see --help.'; fi
-    case "${1:-}" in
-        --help|-h) upgrade_usage; return ;;
-        --check) LEGACY_MIGRATION=true; assessment=true ;;
-        --migrate-legacy) LEGACY_MIGRATION=true ;;
-        '') ;;
-        *) die "Unknown argument: $1 (use --help)." ;;
-    esac
+    local assessment=false action="" option
+    for option in "$@"; do
+        case "$option" in
+            --help|-h) upgrade_usage; return ;;
+            --check|--migrate-legacy)
+                [[ -z "$action" ]] || die 'Choose either --check or --migrate-legacy; see --help.'
+                action="$option"
+                LEGACY_MIGRATION=true
+                if [[ "$option" == --check ]]; then assessment=true; fi
+                ;;
+            --skip-migration-rehearsal) SKIP_MIGRATION_REHEARSAL=true ;;
+            *) die "Unknown argument: $option (use --help)." ;;
+        esac
+    done
+    [[ "$SKIP_MIGRATION_REHEARSAL" == true || "$SKIP_MIGRATION_REHEARSAL" == false ]] ||
+        die 'SKIP_MIGRATION_REHEARSAL must be true or false.'
     [[ $EUID -ne 0 ]] || die 'Run this script as your normal sudo-enabled user, not root.'
     local tool
     for tool in sudo curl python3 psql systemctl dpkg dpkg-query stat tar rsync flock getent cmp sha256sum find pgrep crontab; do
@@ -1298,6 +1442,9 @@ main() {
     [[ -x "$PYTHON_BIN" ]] || die "Python is missing: $PYTHON_BIN"
     [[ "$SYNC_FEEDS" == true || "$SYNC_FEEDS" == false ]] || die 'SYNC_FEEDS must be true or false.'
     [[ "$KEEP_BUILD_FILES" == true || "$KEEP_BUILD_FILES" == false ]] || die 'KEEP_BUILD_FILES must be true or false.'
+    [[ "$AUTO_REMOVE_PACKAGES" == true || "$AUTO_REMOVE_PACKAGES" == false ]] || die 'AUTO_REMOVE_PACKAGES must be true or false.'
+    [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die 'BUILD_JOBS must be a positive integer.'
+    [[ "$FEED_WAIT_SECONDS" =~ ^(0|[1-9][0-9]*)$ ]] || die 'FEED_WAIT_SECONDS must be a non-negative integer without leading zeroes.'
     [[ "$SERVICE_CHECK_SECONDS" =~ ^[0-9]+$ ]] || die 'SERVICE_CHECK_SECONDS must be an integer.'
     validate_progress_interval
     [[ "$INSTALL_PREFIX" == /* && "$INSTALL_PREFIX" != / ]] || die 'INSTALL_PREFIX must be an absolute installation directory.'
