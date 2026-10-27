@@ -822,20 +822,17 @@ finish_progress "$?"
 export OPENVAS_DAEMON="$OPENVAS_SCANNER_VERSION"
 printf 'POSTGRESQL_MAJOR=%s\n' "$POSTGRESQL_MAJOR" >> "$VERSION_LOG"
 
-# Feed-sync defaults must agree with gvmd, including manually forced releases.
-gvmd_major="${GVMD_VERSION%%.*}"
-if [[ -n "$FORCE_FEED_RELEASE" ]]; then
-    FEED_RELEASE="$FORCE_FEED_RELEASE"
-elif (( gvmd_major >= 25 )); then
-    FEED_RELEASE="25.0"
-elif (( gvmd_major < 24 )); then
-    FEED_RELEASE="22.04"
-else
-    die "gvmd 24.x has known feed-loading incompatibilities. Select another gvmd release or explicitly configure FORCE_FEED_RELEASE."
+# Use feed-sync's defaults unless a feed release is explicitly forced.
+FEED_COMMAND="/usr/local/bin/greenbone-feed-sync"
+
+if [[ -n "${FORCE_FEED_RELEASE:-}" ]]; then
+    [[ "$FORCE_FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] ||
+        die "Invalid feed release: $FORCE_FEED_RELEASE"
+
+    FEED_COMMAND+=" --feed-release $FORCE_FEED_RELEASE"
 fi
-[[ "$FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] || die "Invalid feed release: $FEED_RELEASE"
-FEED_COMMAND="/usr/local/bin/greenbone-feed-sync --feed-release $FEED_RELEASE"
-printf 'FEED_RELEASE=%s\n' "$FEED_RELEASE" >> "$VERSION_LOG"
+
+# Record the requested override; blank means no script-level override.
 printf 'FORCE_FEED_RELEASE=%s\n' "${FORCE_FEED_RELEASE:-}" >> "$VERSION_LOG"
 
 multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
