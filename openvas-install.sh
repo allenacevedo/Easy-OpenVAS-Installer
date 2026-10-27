@@ -835,7 +835,8 @@ else
 fi
 [[ "$FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] || die "Invalid feed release: $FEED_RELEASE"
 FEED_COMMAND="/usr/local/bin/greenbone-feed-sync --feed-release $FEED_RELEASE"
-printf 'FORCE_FEED_RELEASE=%s\n' "$FEED_RELEASE" >> "$VERSION_LOG"
+printf 'FEED_RELEASE=%s\n' "$FEED_RELEASE" >> "$VERSION_LOG"
+printf 'FORCE_FEED_RELEASE=%s\n' "${FORCE_FEED_RELEASE:-}" >> "$VERSION_LOG"
 
 multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
 export PKG_CONFIG_PATH="$INSTALL_PREFIX/lib/pkgconfig:$INSTALL_PREFIX/lib/$multiarch/pkgconfig:$INSTALL_PREFIX/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
