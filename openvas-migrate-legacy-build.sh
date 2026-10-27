@@ -852,7 +852,8 @@ resolve_versions() {
         die "gvmd 24.x needs an explicitly selected compatible FORCE_FEED_RELEASE."
     fi
     [[ "$FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] || die "Invalid feed release: $FEED_RELEASE"
-    printf 'FORCE_FEED_RELEASE=%s\n' "$FEED_RELEASE" >> "$VERSION_LOG"
+    printf 'FEED_RELEASE=%s\n' "$FEED_RELEASE" >> "$VERSION_LOG"
+    printf 'FORCE_FEED_RELEASE=%s\n' "${FORCE_FEED_RELEASE:-}" >> "$VERSION_LOG"
 }
 
 reject_gvmd_downgrade() {
