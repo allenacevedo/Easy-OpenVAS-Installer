@@ -841,18 +841,18 @@ resolve_versions() {
         printf '%s%s=%s%s\n' "$LGREEN" "$version" "$selected" "$NC"
         printf 'FORCE_%s=%s\n' "$version" "$selected" >> "$VERSION_LOG"
     done
-    local major="${GVMD_VERSION%%.*}"
-    if [[ -n "$FORCE_FEED_RELEASE" ]]; then
-        FEED_RELEASE="$FORCE_FEED_RELEASE"
-    elif (( major >= 25 )); then
-        FEED_RELEASE=25.0
-    elif (( major < 24 )); then
-        FEED_RELEASE=22.04
-    else
-        die "gvmd 24.x needs an explicitly selected compatible FORCE_FEED_RELEASE."
+
+    # Use feed-sync's defaults unless a feed release is explicitly forced.
+    FEED_COMMAND="/usr/local/bin/greenbone-feed-sync"
+
+    if [[ -n "${FORCE_FEED_RELEASE:-}" ]]; then
+        [[ "$FORCE_FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] ||
+            die "Invalid feed release: $FORCE_FEED_RELEASE"
+
+        FEED_COMMAND+=" --feed-release $FORCE_FEED_RELEASE"
     fi
-    [[ "$FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] || die "Invalid feed release: $FEED_RELEASE"
-    printf 'FEED_RELEASE=%s\n' "$FEED_RELEASE" >> "$VERSION_LOG"
+
+    # Record the requested override; blank means no script-level override.
     printf 'FORCE_FEED_RELEASE=%s\n' "${FORCE_FEED_RELEASE:-}" >> "$VERSION_LOG"
 }
 
