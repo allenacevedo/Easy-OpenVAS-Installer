@@ -13,7 +13,7 @@ wget https://raw.githubusercontent.com/itiligent/Easy-OpenVAS-Installer/main/ope
 ---
 
 > [!CAUTION]
-> **For existing installations (pre-November 2026 update):** You **must run the included one-time migration script** before using the below new upgrade script for future ongoing updates.
+> **For existing installations (pre-November 2026 update):** You **must run the included one-time migration script** before using the below upgrade script for ongoing updates.
 
 ### 📦 Auto upgrade link (November 2026 update builds | migrated builds only)
 ```bash
