@@ -4,7 +4,7 @@
 ###################################################################################
 # Windows target setup for Greenbone/OpenVAS credentialed SMB and WMI scans
 # David Harrop
-# October 2026
+# November 2026
 #
 # Requires an elevated Windows PowerShell session.
 # View examples: Get-Help .\prepare-smb-cred-scan.ps1 -Examples
