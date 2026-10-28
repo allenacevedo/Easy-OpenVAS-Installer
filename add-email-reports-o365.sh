@@ -3,7 +3,7 @@
 # Microsoft 365 outbound email setup for an OpenVAS appliance
 # For Ubuntu / Debian / Raspberry Pi OS
 # David Harrop
-# October 2026
+# November 2026
 #
 # Run: sudo ./add-email-reports-o365.sh
 # Help: ./add-email-reports-o365.sh --help
