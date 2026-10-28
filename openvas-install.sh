@@ -3,8 +3,8 @@
 # Greenbone Vulnerability Manager appliance Install script
 # Multi-distro support for Ubuntu, Debian & Raspbian
 # David Harrop
-# October 2026
-# Build dependency fixes: 24 October 2026
+# November 2026
+# Build dependency fixes: November 2026
 ##############################################################################
 
 ##############################################################################
@@ -29,26 +29,33 @@ CERT_DAYS="3650"                      # For TLS cert, number of days until self 
 CERT_EC_CURVE="prime256v1"            # ECDSA P-256 (256-bit curve).
 
 # FORCE MODULE VERSIONS or use blank "" to automatically download latest
-FORCE_GVM_LIBS_VERSION=""             # see https://github.com/greenbone/gvm-libs
-FORCE_GVMD_VERSION=""                 # see https://github.com/greenbone/gvmd
-FORCE_PG_GVM_VERSION=""               # see https://github.com/greenbone/pg-gvm
-FORCE_GSA_VERSION=""                  # see https://github.com/greenbone/gsa
-FORCE_GSAD_VERSION=""                 # see https://github.com/greenbone/gsad
-FORCE_OPENVAS_SMB_VERSION=""          # see https://github.com/greenbone/openvas-smb
-FORCE_OPENVAS_SCANNER_VERSION=""  	  # see https://github.com/greenbone/openvas-scanner
-FORCE_OSPD_OPENVAS_VERSION=""         # see https://github.com/greenbone/ospd-openvas
-# OSPD_OPENVAS_VERSION always use the selected OPENVAS_SCANNER_VERSION source version.
-FORCE_FEED_SYNC_VERSION=""            # see https://github.com/greenbone/greenbone-feed-sync
-FORCE_GVM_TOOLS_VERSION=""            # see https://github.com/greenbone/gvm-tools
-FORCE_PYTHON_GVM_VERSION=""           # see https://github.com/greenbone/python-gvm
-FORCE_PYPSRP_CLI_VERSION=""           # see https://github.com/greenbone/pypsrp-cli
-FORCE_FEED_RELEASE=""                 # Blank: use the feed compatible with the selected gvmd.
+FORCE_GVM_LIBS_VERSION="${FORCE_GVM_LIBS_VERSION:-}"				# see https://github.com/greenbone/gvm-libs
+FORCE_GVMD_VERSION="${FORCE_GVMD_VERSION:-}"						# see https://github.com/greenbone/gvmd
+FORCE_PG_GVM_VERSION="${FORCE_PG_GVM_VERSION:-}"					# see https://github.com/greenbone/pg-gvm
+FORCE_GSA_VERSION="${FORCE_GSA_VERSION:-}"							# see https://github.com/greenbone/gsa
+FORCE_GSAD_VERSION="${FORCE_GSAD_VERSION:-}"						# see https://github.com/greenbone/gsad
+FORCE_OPENVAS_SMB_VERSION="${FORCE_OPENVAS_SMB_VERSION:-}"			# see https://github.com/greenbone/openvas-smb
+FORCE_OPENVAS_SCANNER_VERSION="${FORCE_OPENVAS_SCANNER_VERSION:-}"	# see https://github.com/greenbone/openvas-scanner
+FORCE_OSPD_OPENVAS_VERSION="${FORCE_OSPD_OPENVAS_VERSION:-}"		# see https://github.com/greenbone/ospd-openvas
+# openvasd and scannerctl use the selected OPENVAS_SCANNER_VERSION source; OSPD is versioned independently.
+FORCE_FEED_SYNC_VERSION="${FORCE_FEED_SYNC_VERSION:-}"				# see https://github.com/greenbone/greenbone-feed-sync
+FORCE_GVM_TOOLS_VERSION="${FORCE_GVM_TOOLS_VERSION:-}"				# see https://github.com/greenbone/gvm-tools
+FORCE_PYTHON_GVM_VERSION="${FORCE_PYTHON_GVM_VERSION:-}"			# see https://github.com/greenbone/python-gvm
+FORCE_PYPSRP_CLI_VERSION="${FORCE_PYPSRP_CLI_VERSION:-}"			# see https://github.com/greenbone/pypsrp-cli
+FORCE_FEED_RELEASE="${FORCE_FEED_RELEASE:-}"						# Blank: use feed-sync's defaults; set a release to pin.
+
+# INITIAL FEED DOWNLOAD RETRIES
+FEED_SYNC_ATTEMPTS="${FEED_SYNC_ATTEMPTS:-3}" # Total attempts, including the first (1-99).
+FEED_SYNC_RETRY_DELAY="${FEED_SYNC_RETRY_DELAY:-60}" # Seconds between attempts (0-3600).
 
 # BUILD PATHS
 PYTHON_BIN="/usr/bin/python3"         # Use the distro Python with matching development headers.
 PYTHON_ENV_DIR="/opt/gvm/venvs"       # Separate Python applications from distro packages.
 BUILD_LOG_DIR="$HOME/openvas-build-logs" # Kept after build/source cleanup.
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-0.2}" # Spinner interval in seconds; fractions are supported.
+
+# OPTIONAL APT CLEANUP
+APT_AUTOREMOVE="${APT_AUTOREMOVE:-false}" # true: remove unused APT packages after the build.
 
 # POSTGRESQL VERSION MANAGEMENT
 source /etc/os-release
@@ -387,6 +394,22 @@ installer_exit() {
 }
 # END INSTALLER PROGRESS DISPLAY
 
+# Validate optional cleanup before the installer changes the system.
+if [[ "$APT_AUTOREMOVE" != true && "$APT_AUTOREMOVE" != false ]]; then
+    printf '%sAPT_AUTOREMOVE must be true or false.%s\n' "$LRED" "$NC" >&2
+    exit 1
+fi
+
+# Validate retry settings before the installer changes the system.
+if [[ ! "$FEED_SYNC_ATTEMPTS" =~ ^[1-9][0-9]?$ ]]; then
+    printf '%sFEED_SYNC_ATTEMPTS must be an integer from 1 to 99.%s\n' "$LRED" "$NC" >&2
+    exit 1
+fi
+if [[ ! "$FEED_SYNC_RETRY_DELAY" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( FEED_SYNC_RETRY_DELAY > 3600 )); then
+    printf '%sFEED_SYNC_RETRY_DELAY must be an integer from 0 to 3600 seconds.%s\n' "$LRED" "$NC" >&2
+    exit 1
+fi
+
 clear
 
 # Make sure the user is NOT running this script as root
@@ -694,6 +717,64 @@ prepare_native_archives() {
     [[ -f "$pcap_prefix/include/pcap.h" ]] || die "Native libpcap header missing."
     printf 'KRB5_VERSION=%s\nLIBPCAP_VERSION=%s\n' "$krb5_version" "$pcap_version" >> "$VERSION_LOG"
 }
+
+sync_feeds_and_start_services() {
+    # Keep download retries and service startup in one authenticated sudo session.
+    sudo bash -e -s -- "$INSTALL_PREFIX/bin/greenbone-feed-sync" \
+        "${FORCE_FEED_RELEASE:-}" "$FEED_SYNC_ATTEMPTS" "$FEED_SYNC_RETRY_DELAY" \
+        "$BUILD_LOG" "$LYELLOW" "$LRED" "$NC" <<'FEED_STARTUP'
+feed_command=("$1")
+[[ -z "$2" ]] || feed_command+=(--feed-release "$2")
+attempts="$3" retry_delay="$4" build_log="$5"
+yellow="$6" red="$7" reset="$8"
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+for ((attempt = 1; attempt <= attempts; attempt++)); do
+    # Repair existing files in place: replacing a lock file would break locking.
+    # Repeat before every attempt, since feed-sync drops privileges to gvm.
+    for lock in /var/lib/openvas/feed-update.lock /var/lib/gvm/feed-update.lock; do
+        if [[ -L "$lock" || ( -e "$lock" && ! -f "$lock" ) ]]; then
+            printf '%sInvalid feed lock file: %s%s\n' "$red" "$lock" "$reset" >&2
+            exit 1
+        fi
+        if [[ -f "$lock" ]]; then
+            chown gvm:gvm "$lock"
+            chmod 0660 "$lock"
+        fi
+    done
+
+    printf '%sFeed download attempt %s/%s. Details: %s%s\n' \
+        "$yellow" "$attempt" "$attempts" "$build_log" "$reset"
+    # Keep feed type/URL and error details in the build log, leaving the shared
+    # elapsed-time spinner on screen. --fail-fast still stops each failed attempt.
+    if "${feed_command[@]}" --fail-fast >>"$build_log" 2>&1; then
+        break
+    else
+        status=$?
+    fi
+    case "$status" in 129|130|143) exit "$status" ;; esac
+    if (( attempt == attempts )); then
+        printf '%sFeed download failed after %s attempts (exit %s). Log: %s%s\n' \
+            "$red" "$attempts" "$status" "$build_log" "$reset" >&2
+        exit "$status"
+    fi
+    printf '%sFeed download failed (exit %s); retrying in %s seconds.%s\n' \
+        "$yellow" "$status" "$retry_delay" "$reset"
+    sleep "$retry_delay"
+done
+
+systemctl start ospd-openvas
+systemctl start gvmd
+systemctl start gsad
+systemctl start openvasd
+sleep 15
+systemctl stop gsad
+chown -R gvm:gvm /var/log/gvm
+systemctl start gsad
+FEED_STARTUP
+}
 # End build dependency helpers.
 
 mkdir -p -m 700 "$BUILD_LOG_DIR" || exit 1
@@ -779,6 +860,13 @@ echo
 echo -e "${LGREEN}Common dependencies installed successfully...${NC}"
 enable_terminal_progress
 
+# Preserve existing root mail routing; otherwise deliver locally to the installer account.
+root_alias=$(sudo awk 'tolower($0) ~ /^[[:space:]]*root[[:space:]]*:/ { print }' /etc/aliases)
+if [[ -z "$root_alias" ]]; then
+    printf '\nroot: %s\n' "$(id -un)" | sudo tee -a /etc/aliases >/dev/null
+    run_task "Updating local administrative mail aliases" sudo newaliases
+fi
+
 
 section "Checking latest OpenVAS GitHub releases - edit script to force a version"
 get_latest_release() {
@@ -821,9 +909,12 @@ done
 finish_progress "$?"
 export OPENVAS_DAEMON="$OPENVAS_SCANNER_VERSION"
 printf 'POSTGRESQL_MAJOR=%s\n' "$POSTGRESQL_MAJOR" >> "$VERSION_LOG"
+printf 'APT_AUTOREMOVE=%s\n' "$APT_AUTOREMOVE" >> "$VERSION_LOG"
+printf 'FEED_SYNC_ATTEMPTS=%s\nFEED_SYNC_RETRY_DELAY=%s\n' "$FEED_SYNC_ATTEMPTS" "$FEED_SYNC_RETRY_DELAY" >> "$VERSION_LOG"
 
 # Use feed-sync's defaults unless a feed release is explicitly forced.
-FEED_COMMAND="/usr/local/bin/greenbone-feed-sync"
+# Share this command between the initial sync and the daily cron job.
+FEED_COMMAND="$INSTALL_PREFIX/bin/greenbone-feed-sync"
 
 if [[ -n "${FORCE_FEED_RELEASE:-}" ]]; then
     [[ "$FORCE_FEED_RELEASE" =~ ^[0-9]+\.[0-9]+$ ]] ||
@@ -1076,9 +1167,8 @@ echo
 DIR_TLS_CERT="/etc/gvm/certs"   # GVM default certificate location
 DIR_TLS_KEY="/etc/gvm/private"  # GVM default certificate location
 cd ~
-sudo mkdir -p $DIR_TLS_KEY
-sudo mkdir -p $DIR_TLS_CERT
-run_task "Setting permissions on $DIR_TLS_CERT" sudo chmod -R 644 $DIR_TLS_CERT
+run_task "Preparing the TLS certificate directory" sudo install -d -o root -g root -m 0755 "$DIR_TLS_CERT"
+run_task "Preparing the TLS private key directory" sudo install -d -o root -g gvm -m 0750 "$DIR_TLS_KEY"
 cat <<EOF | tee cert_attributes.txt
 [req]
 distinguished_name  = req_distinguished_name
@@ -1112,11 +1202,14 @@ run_task "Generating the TLS certificate" openssl req -x509 -nodes -newkey ec \
 run_task "Exporting the Windows TLS certificate" sudo openssl pkcs12 -export -out $CERT_DOMAIN.pfx -inkey $CERT_DOMAIN.key -in $CERT_DOMAIN.crt -password pass:1234
 
 # Copy new certification output files to a dedicated location & set their acccess permissions
-sudo mv $CERT_DOMAIN.crt $DIR_TLS_CERT/$CERT_DOMAIN.crt
-sudo mv $CERT_DOMAIN.pfx $DIR_TLS_CERT/$CERT_DOMAIN.pfx
-sudo mv $CERT_DOMAIN.key $DIR_TLS_KEY/$CERT_DOMAIN.key
-sudo chmod 644 -R $DIR_TLS_CERT
-sudo chmod 644 -R $DIR_TLS_KEY
+sudo mv "$CERT_DOMAIN.crt" "$DIR_TLS_CERT/$CERT_DOMAIN.crt"
+sudo mv "$CERT_DOMAIN.pfx" "$DIR_TLS_CERT/$CERT_DOMAIN.pfx"
+sudo mv "$CERT_DOMAIN.key" "$DIR_TLS_KEY/$CERT_DOMAIN.key"
+sudo chown root:root "$DIR_TLS_CERT/$CERT_DOMAIN.crt" "$DIR_TLS_CERT/$CERT_DOMAIN.pfx"
+sudo chown root:gvm "$DIR_TLS_KEY/$CERT_DOMAIN.key"
+sudo chmod 0644 "$DIR_TLS_CERT/$CERT_DOMAIN.crt"
+sudo chmod 0600 "$DIR_TLS_CERT/$CERT_DOMAIN.pfx"
+sudo chmod 0640 "$DIR_TLS_KEY/$CERT_DOMAIN.key"
 # End TLS certificate creation
 
 # Download gsad sources
@@ -1560,9 +1653,7 @@ sudo ldconfig
 "$INSTALL_PREFIX/sbin/gsad" --version
 "$INSTALL_PREFIX/bin/openvasd" --version
 "$INSTALL_PREFIX/bin/scannerctl" --help >/dev/null
-trap - ERR
-set +Ee
-set +o pipefail
+# Keep strict error handling active through configuration and service checks.
 echo "Build log: $BUILD_LOG"
 echo "Resolved versions: $VERSION_LOG"
 
@@ -1598,13 +1689,15 @@ sudo chmod 6750 /usr/local/sbin/gvmd
 # Import the update feed's digital signature
 run_task "Downloading the Greenbone signing key" curl -f -L https://www.greenbone.net/GBCommunitySigningKey.asc -o /tmp/GBCommunitySigningKey.asc
 export GNUPGHOME=/tmp/openvas-gnupg
-mkdir -p $GNUPGHOME
+mkdir -p "$GNUPGHOME"
+chmod 0700 "$GNUPGHOME"
 gpg --import /tmp/GBCommunitySigningKey.asc
 echo "8AE4BE429B60A59B311C2E739823FAA60ED1E580:6:" | gpg --import-ownertrust
 export OPENVAS_GNUPG_HOME=/etc/openvas/gnupg
 sudo mkdir -p $OPENVAS_GNUPG_HOME
 run_task "Installing the feed signing key" sudo cp -rfv /tmp/openvas-gnupg/* $OPENVAS_GNUPG_HOME/
 run_task "Setting permissions on $OPENVAS_GNUPG_HOME" sudo chown -R gvm:gvm $OPENVAS_GNUPG_HOME
+sudo chmod 0700 "$OPENVAS_GNUPG_HOME"
 
 # Set sudo permissions on the gvm service account
 sudo sh -c "echo '%gvm ALL = NOPASSWD: /usr/local/sbin/openvas' >> /etc/sudoers"
@@ -1616,10 +1709,28 @@ run_task "Configuring the GVM database role" sudo -Hiu postgres psql gvmd -c "cr
 sudo ldconfig
 
 # Create the GVM admin user
-run_task "Creating the GVM administrator" sudo /usr/local/sbin/gvmd --create-user=${ADMIN_USER} --password=${ADMIN_PASS}
+run_task "Creating the GVM administrator" sudo /usr/local/sbin/gvmd --create-user="$ADMIN_USER" --password="$ADMIN_PASS"
 
 # Set the GVM feed import owner to the GVM admin user
-run_task "Setting the feed import owner" sudo /usr/local/sbin/gvmd --modify-setting 78eceaec-3385-11ea-b237-28d24461215b --value $(sudo /usr/local/sbin/gvmd --get-users --verbose | grep ${ADMIN_USER} | awk '{print $2}')
+admin_uuid=$(sudo /usr/local/sbin/gvmd --get-users --verbose |
+    "$PYTHON_BIN" -c '
+import sys
+import uuid
+
+matches = []
+for line in sys.stdin:
+    fields = line.rstrip("\r\n").rsplit(None, 1)
+    if len(fields) == 2 and fields[0] == sys.argv[1]:
+        matches.append(fields[1])
+if len(matches) != 1:
+    raise SystemExit("Expected exactly one UUID for the selected GVM administrator.")
+try:
+    uuid.UUID(matches[0])
+except ValueError:
+    raise SystemExit("The selected GVM administrator has an invalid UUID.")
+print(matches[0])
+' "$ADMIN_USER")
+run_task "Setting the feed import owner" sudo /usr/local/sbin/gvmd --modify-setting 78eceaec-3385-11ea-b237-28d24461215b --value "$admin_uuid"
 
 echo -e ${LGREEN}
 # read -p "Press enter to continue" # (use this for debugging)
@@ -1632,7 +1743,11 @@ run_task "Removing temporary staging files" sudo rm -rf $INSTALL_DIR
 run_task "Removing temporary build files" sudo rm -rf $BUILD_DIR
 rm cert_attributes.txt
 sudo rm -f /tmp/GBCommunitySigningKey.asc
-run_task "Removing unused build packages" sudo apt-get autoremove -qq -y
+if [[ "$APT_AUTOREMOVE" == true ]]; then
+    run_task "Removing unused APT packages" sudo apt-get autoremove -qq -y
+else
+    printf '%sSkipping APT autoremove (APT_AUTOREMOVE=false).%s\n' "$LYELLOW" "$NC"
+fi
 echo
 
 # Update ufw rules & stop fw log chatter
@@ -1648,30 +1763,40 @@ section "Setting up a random daily cron schedule for feed updates"
 # Schedule a random daily feed update time
 HOUR=$(shuf -i 0-23 -n 1)
 MINUTE=$(shuf -i 0-59 -n 1)
-sudo crontab -l >cron_1
+if sudo env LC_ALL=C crontab -l >cron_1 2>cron_1.err; then
+    :
+else
+    cron_status=$?
+    if [[ "$cron_status" == 1 && "$(<cron_1.err)" == "no crontab for root" ]]; then
+        : >cron_1
+    else
+        cat cron_1.err >&2
+        die "Cannot read root's crontab; the existing schedule has not been replaced."
+    fi
+fi
+if [[ -s cron_1.err ]]; then cat cron_1.err >&2; fi
 # Remove any previously added feed update schedules
 sudo sed -i '/greenbone-feed-sync/d' cron_1
-echo "${MINUTE} ${HOUR} * * * $FEED_COMMAND" >>cron_1
-sudo crontab cron_1
-rm cron_1
+echo "${MINUTE} ${HOUR} * * * $FEED_COMMAND --quiet" >>cron_1
+run_task "Installing the daily feed update schedule" sudo crontab cron_1 ||
+    die "Could not install root's feed update schedule."
+rm cron_1 cron_1.err
 echo -e "Feed update scheduled daily at ${HOUR}:${MINUTE}"
 
 section "A feed update is required before OpenVAS can start, THIS MAY TAKE A LONG TIME"
 
 # Update GVM & start the services
-# This must be a one-liner because lengthy feed updates cause sudo credentials to time out before the script can finish.
+# Keep retries and startup in one sudo session so a long feed update cannot interrupt startup for authentication.
 # Also includes a privs fix becasue gsad is started with --drop-privileges (allowing binding to port 443), this results in gsad.log
 # being initially created with the wrong privs on 1st startup.
-echo
-run_task "Synchronizing feeds and starting OpenVAS services" sudo bash -e -c "$FEED_COMMAND
-systemctl start ospd-openvas
-systemctl start gvmd
-systemctl start gsad
-systemctl start openvasd
-sleep 15
-systemctl stop gsad
-chown -R gvm:gvm /var/log/gvm
-systemctl start gsad" || die "Feed synchronization or service startup failed."
+# Detailed feed output goes to the build log while the shared elapsed-time spinner remains visible.
+
+run_task "Synchronizing feeds and starting OpenVAS services" sync_feeds_and_start_services ||
+    die "Feed synchronization or service startup failed. Log: $BUILD_LOG"
+for service in redis-server@openvas ospd-openvas openvasd gvmd gsad; do
+    run_task "Checking $service.service" sudo systemctl is-active --quiet "$service.service" ||
+        die "OpenVAS service check failed: $service.service"
+done
 stop_logging
 
 # Display client certificate import instructions using the shared palette.
