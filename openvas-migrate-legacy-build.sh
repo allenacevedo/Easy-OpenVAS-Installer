@@ -3,8 +3,8 @@
 # Greenbone Vulnerability Manager appliance upgrade script
 # Multi-distro support for Ubuntu, Debian & Raspbian
 # David Harrop
-# October 2026
-# Build dependency fixes: 24 October 2026
+# November 2026
+# Build dependency fixes: November 2026
 #
 # For older OpenVAS installations built with the installer versions from
 # this repo before the October 2026 update.
