@@ -2,7 +2,7 @@
 #########################################################################################################################
 # Greenbone Vulnerability Manager appliance https certificate update script
 # David Harrop
-# October 2026
+# November 2026
 # Use this script if:#
 # Changing the dns name of your OpenVAS appliance
 # Changing the IP adddress or your OpenVAS appliance
