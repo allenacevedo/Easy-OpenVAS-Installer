@@ -1,6 +1,6 @@
 # Greenbone OpenVAS Scanner Build & Upgrade Scripts
 
-### October 2026 - Major Build Update
+### November 2026 - Major Build Update
 
 The installation and upgrade scripts have been heavily restructured to support many recent Greenbone/OpenVAS changes, including new native dependencies, Rust/Cargo components, and isolated Python environments.
 
@@ -13,9 +13,9 @@ wget https://raw.githubusercontent.com/itiligent/Easy-OpenVAS-Installer/main/ope
 ---
 
 > [!CAUTION]
-> **Existing installations (pre-October 2026 update):** You **must run the included one-time migration script** before using the below new upgrade script for future ongoing updates.
+> **Existing installations (pre-November 2026 update):** You **must run the included one-time migration script** before using the below new upgrade script for future ongoing updates.
 
-### 📦 Auto upgrade link (October 2026 update builds | migrated builds only)
+### 📦 Auto upgrade link (November 2026 update builds | migrated builds only)
 ```bash
 wget https://raw.githubusercontent.com/itiligent/Easy-OpenVAS-Installer/main/openvas-upgrade.sh && chmod +x openvas-upgrade.sh  && ./openvas-upgrade.sh 
 ```
