@@ -45,14 +45,14 @@ FORCE_PYPSRP_CLI_VERSION="${FORCE_PYPSRP_CLI_VERSION:-}"			# see https://github.
 FORCE_FEED_RELEASE="${FORCE_FEED_RELEASE:-}"						# Blank: use feed-sync's defaults; set a release to pin.
 
 # INITIAL FEED DOWNLOAD RETRIES
-FEED_SYNC_ATTEMPTS="${FEED_SYNC_ATTEMPTS:-3}" # Total attempts, including the first (1-99).
-FEED_SYNC_RETRY_DELAY="${FEED_SYNC_RETRY_DELAY:-60}" # Seconds between attempts (0-3600).
+FEED_SYNC_ATTEMPTS="${FEED_SYNC_ATTEMPTS:-3}"			# Total attempts, including the first (1-99).
+FEED_SYNC_RETRY_DELAY="${FEED_SYNC_RETRY_DELAY:-60}"	# Seconds between attempts (0-3600).
 
 # BUILD PATHS
-PYTHON_BIN="/usr/bin/python3"         # Use the distro Python with matching development headers.
-PYTHON_ENV_DIR="/opt/gvm/venvs"       # Separate Python applications from distro packages.
-BUILD_LOG_DIR="$HOME/openvas-build-logs" # Kept after build/source cleanup.
-PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-0.2}" # Spinner interval in seconds; fractions are supported.
+PYTHON_BIN="/usr/bin/python3"					# Use the distro Python with matching development headers.
+PYTHON_ENV_DIR="/opt/gvm/venvs"					# Separate Python applications from distro packages.
+BUILD_LOG_DIR="$HOME/openvas-build-logs"		# Kept after build/source cleanup.
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-0.2}"	# Spinner interval in seconds; fractions are supported.
 
 # OPTIONAL APT CLEANUP
 APT_AUTOREMOVE="${APT_AUTOREMOVE:-false}" # true: remove unused APT packages after the build.
